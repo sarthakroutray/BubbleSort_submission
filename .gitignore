@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dataset/
+*.tsv
+*.parquet
+!output/.gitkeep
+work/
+cache/
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.zip
+.commandcode/
