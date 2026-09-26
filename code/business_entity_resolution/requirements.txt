@@ -6,3 +6,4 @@ lightgbm>=4.0
 rapidfuzz>=3.0
 sparse-dot-topn>=1.1
 anyascii>=0.3
+pyarrow>=15.0
