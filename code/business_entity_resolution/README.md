@@ -50,6 +50,12 @@ backend on the RTX 5060 — verified to reproduce the CPU metrics (val macro F0.
 0.9403 vs 0.9412). CUDA is not compiled into the pip wheel, so `device_type='gpu'`
 (OpenCL) is used. Feature building and sparse retrieval stay CPU-bound.
 
+Kaggle: `kaggle/ber_pipeline.ipynb` runs this pipeline on a Kaggle accelerator
+(upload the data + this code folder as two private Datasets; enable Internet). Kaggle's
+GPU is only used by LightGBM / an optional reranker — the real reason to run there is
+the 30 GB RAM, which allows `build_training_set --sample 500000`. Note the measured
+oracle ceiling: blocking caps macro F0.5 at ~0.983, so 0.99 is not reachable this way.
+
 Formatted empty baseline (pins the output contract, no model needed):
 
 ```bash

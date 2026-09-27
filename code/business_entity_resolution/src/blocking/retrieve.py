@@ -246,7 +246,7 @@ def shard_layout(idx_dir, meta, country):
     return layout
 
 
-def load_s1_country(corpus: str, country: str):
+def load_s1_country(corpus: str, country: str, limit: int = 0):
     """Only one country's S1 (id, name, address) — keeps peak RAM low."""
     path = S1_DIRS[corpus] / S1_FILES[corpus]
     ids, names, addrs = [], [], []
@@ -258,6 +258,8 @@ def load_s1_country(corpus: str, country: str):
                 ids.append(row[0])
                 names.append(row[1])
                 addrs.append(row[2])
+                if limit and len(ids) >= limit:
+                    break
     return (np.array(ids, dtype=object), np.array(names, dtype=object),
             np.array(addrs, dtype=object))
 

@@ -37,15 +37,22 @@ TEST_BATCH_SIZE = 100_000
 CANDIDATE_FILE = OUTPUT_DIR / "candidate_pairs.tsv"
 MATCHING_FILE = OUTPUT_DIR / "matching_results.tsv"
 
-# LightGBM device. "gpu" uses the OpenCL backend (the shipped wheel is built with
-# USE_GPU=ON but not USE_CUDA), which drives the NVIDIA GPU via the driver's
-# OpenCL ICD; "cpu" is the fallback and produces identical metrics (plan §7).
-LGB_DEVICE = os.environ.get("ER_LGB_DEVICE", "cpu").strip().lower()
+# Test-corpus country mix (EDA, plan §3): held-out val is reweighted with this so
+# the local metric tracks the leaderboard distribution (train val is US-heavy).
+TEST_COUNTRY_MIX = {"India": 0.467, "US": 0.383, "France": 0.15}
+
+# LightGBM compute backend. Default is the CUDA tree learner (USE_CUDA build,
+# native sm_120 kernels for the RTX 5060); train()/predict fall back to CPU
+# automatically if CUDA is unavailable. "gpu" = legacy OpenCL backend (refit
+# unstable -> CPU refit is forced in train_matcher). Override via ER_LGB_DEVICE.
+LGB_DEVICE = os.environ.get("ER_LGB_DEVICE", "cuda").strip().lower()
 
 
 def lgb_device_params(device: str = None) -> dict:
     device = (device or LGB_DEVICE or "cpu").lower()
-    if device in ("gpu", "cuda"):
+    if device == "cuda":
+        return {"device_type": "cuda"}
+    if device == "gpu":
         return {"device_type": "gpu", "gpu_platform_id": 0,
                 "gpu_device_id": 0, "gpu_use_dp": False}
     return {"device_type": "cpu"}

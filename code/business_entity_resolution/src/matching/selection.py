@@ -16,7 +16,7 @@ ABSENT = -1.0
 
 
 def select_matches(candidates, tau_singleton=0.68, tau_match=0.60, gamma_rel=0.70,
-                   max_matches=12):
+                   max_matches=12, return_probs=False):
     if not candidates:
         return []
     best = max(c["prob"] for c in candidates)
@@ -24,8 +24,46 @@ def select_matches(candidates, tau_singleton=0.68, tau_match=0.60, gamma_rel=0.7
         return []
     thr = max(tau_match, best * gamma_rel)
     kept = sorted((c for c in candidates if c["prob"] >= thr),
-                  key=lambda c: c["prob"], reverse=True)
-    return [c["entity_id"] for c in kept[:max_matches]]
+                  key=lambda c: c["prob"], reverse=True)[:max_matches]
+    if return_probs:
+        return [(c["entity_id"], c["prob"]) for c in kept]
+    return [c["entity_id"] for c in kept]
+
+
+def resolve_one_to_one(claims):
+    """Greedy max-weight one-to-one resolution over contested claims.
+
+    GT is a perfect matching (each S2/S3 belongs to at most one S1), so a
+    candidate selected by two S1s is a guaranteed FP for one of them. Two-pass
+    greedy (plan §8.1):
+      1. every S1's single best claim competes globally, highest prob wins;
+      2. all remaining claims fill in prob-desc order on unclaimed candidates.
+
+    Pass 1 guarantees an S1 keeps at least its best claim unless that claim
+    itself lost to a stronger S1 — the evidence then says the candidate
+    belongs elsewhere.
+
+    claims: iterable of (s1_id, candidate_id, prob). Returns {(s1, cand)}.
+    """
+    claims = list(claims)
+    best = {}
+    for s1, cand, p in claims:
+        cur = best.get(s1)
+        if cur is None or p > cur[0]:
+            best[s1] = (p, cand)
+    kept = set()
+    used = {}
+    for s1, (p, cand) in sorted(best.items(), key=lambda kv: -kv[1][0]):
+        if cand not in used:
+            used[cand] = s1
+            kept.add((s1, cand))
+    rest = [(p, s1, cand) for s1, cand, p in claims
+            if cand != best[s1][1] and (s1, cand) not in kept]
+    for p, s1, cand in sorted(rest, key=lambda t: (-t[0], t[1], t[2])):
+        if cand not in used:
+            used[cand] = s1
+            kept.add((s1, cand))
+    return kept
 
 
 def _f05(p, r):
@@ -42,9 +80,14 @@ def _f_from_counts(pred_count, hit, true_total):
                     np.where((pred_count == 0) | (true_total == 0), 0.0, _f05(p, r)))
 
 
-def evaluate_selection(P, T, true_total, tau_singleton=0.68, tau_match=0.60,
-                       gamma_rel=0.70, max_matches=12):
-    """P/T padded with ABSENT/False. Macro F0.5 over ALL entities."""
+def per_entity_f05(P, T, true_total, tau_singleton=0.68, tau_match=0.60,
+                   gamma_rel=0.70, max_matches=12):
+    """Per-entity F0.5 under the selection rule. Returns (f, kept, order, masked, hits).
+
+    ``kept[i, j]`` / ``order[i, j]`` / ``masked[i, j]`` describe the j-th kept
+    candidate of entity i (prob-desc), aligned with the padded candidate matrix
+    — exactly what ``apply_one_to_one_f05`` needs to resolve claims globally.
+    """
     P = np.asarray(P, dtype=np.float32)
     T = np.asarray(T, dtype=bool)
     best = P.max(axis=1)
@@ -57,7 +100,46 @@ def evaluate_selection(P, T, true_total, tau_singleton=0.68, tau_match=0.60,
     kept = np.take_along_axis(masked, order, axis=1) > ABSENT
     hits = (np.take_along_axis(T, order, axis=1) & kept).sum(axis=1)
     f = _f_from_counts(kept.sum(axis=1), hits, true_total)
+    return f, kept, order, masked, hits
+
+
+def evaluate_selection(P, T, true_total, tau_singleton=0.68, tau_match=0.60,
+                       gamma_rel=0.70, max_matches=12):
+    """P/T padded with ABSENT/False. Macro F0.5 over ALL entities."""
+    f, kept, _order, _masked, hits = per_entity_f05(P, T, true_total,
+                                                    tau_singleton, tau_match,
+                                                    gamma_rel, max_matches)
     return float(f.mean()), kept.sum(axis=1), hits
+
+
+def apply_one_to_one_f05(P, T, true_total, cmat, s1_ids, tau_singleton=0.68,
+                         tau_match=0.60, gamma_rel=0.70, max_matches=12):
+    """Macro F0.5 after global one-to-one resolution of the selected claims.
+
+    ``cmat`` is the padded candidate-id matrix aligned with P/T (same layout
+    ``padded_val`` produces). Applies the identical selection rule, then drops
+    contested claims via ``resolve_one_to_one`` before scoring.
+    """
+    f, kept, order, masked, _hits = per_entity_f05(P, T, true_total,
+                                                   tau_singleton, tau_match,
+                                                   gamma_rel, max_matches)
+    n, cap = kept.shape
+    claims, col_of = [], []
+    for i in range(n):
+        for j in range(cap):
+            if kept[i, j]:
+                claims.append((s1_ids[i], cmat[i, order[i, j]], float(masked[i, j])))
+                col_of.append((i, order[i, j]))
+    kept_set = resolve_one_to_one(claims)
+    pred_counts = np.zeros(n, dtype=np.int64)
+    hits = np.zeros(n, dtype=np.int64)
+    for idx, (i, c) in enumerate(col_of):
+        if claims[idx][:2] in kept_set:
+            pred_counts[i] += 1
+            if T[i, c]:
+                hits[i] += 1
+    f2 = _f_from_counts(pred_counts, hits, true_total)
+    return float(f2.mean()), int(len(claims)), int(len(kept_set))
 
 
 def oracle_f05(T, true_total):

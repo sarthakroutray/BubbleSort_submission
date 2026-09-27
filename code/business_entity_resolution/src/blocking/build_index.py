@@ -64,6 +64,9 @@ def hid(feature: str) -> int:
 
 @lru_cache(maxsize=500_000)
 def _name_features(name: str):
+    # v1 bag (validated): adjacent bigrams only. Ordered-subset variants (v2-v5:
+    # concat/c_/anchor bigrams) were all measured and REJECTED — they dilute the
+    # top-K ordering (v5: recall@50 0.9425 -> 0.9072) for negligible deep gains.
     raw, _core = name_views(name)
     toks = raw.split()
     feats = []

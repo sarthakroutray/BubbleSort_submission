@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src import config  # noqa: E402
 from src.blocking import retrieve as rt  # noqa: E402
 
-KS = (1, 3, 5, 10, 20, 30, 50, 75, 100)
+KS = (1, 3, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500)
 
 
 def load_gt(path: Path, subset: set = None):
@@ -199,6 +199,10 @@ def main(argv=None):
     sweep100 = prune_sweep(raw, gt, sample, kmax=min(a.kmax, 100))
     oracle50 = oracle_f05_raw(raw, gt, sample, 50)
     oracle100 = oracle_f05_raw(raw, gt, sample, min(a.kmax, 100))
+    oracles = {"K50": oracle50, f"K{min(a.kmax,100)}": oracle100}
+    for big_k in (200, 300, 500):
+        if a.kmax >= big_k:
+            oracles[f"K{big_k}"] = oracle_f05_raw(raw, gt, sample, big_k)
 
     report = {
         "sample": len(sample),
@@ -207,6 +211,7 @@ def main(argv=None):
         "recall_at_k": curve,
         "oracle_macro_f05_k50": oracle50,
         "oracle_macro_f05_k100": oracle100,
+        "oracles": oracles,
         "pruned_recall_at_kmax": pcurve,
         "avg_candidates_pruned": (sum(len(v) for v in pruned.values()) / max(len(pruned), 1)),
         "prune_sweep_top50": sweep50,
@@ -214,8 +219,8 @@ def main(argv=None):
         "diagnostics": diag,
         "elapsed_s": round(time.time() - t0, 1),
     }
-    print(f"[eval] ORACLE macro F0.5 on our candidates: K=50 {oracle50:.4f} | "
-          f"K=100 {oracle100:.4f}")
+    print(f"[eval] ORACLE macro F0.5 on our candidates: " +
+          " | ".join(f"{k} {v:.4f}" for k, v in oracles.items()))
     for label, sweep in (("top-50", sweep50), ("top-100", sweep100)):
         print(f"[eval] prune sweep ({label}):")
         for row in sweep:

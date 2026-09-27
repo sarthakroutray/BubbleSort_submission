@@ -1,12 +1,27 @@
-"""~39 pair features per (s1, s2|s3) via rapidfuzz; float32 arrays.
+"""~42 pair features per (s1, s2|s3) via rapidfuzz; float32 arrays.
 
 Spec: FINAL_RESEARCH_AND_IMPLEMENTATION_PLAN.md §5.4. ``country`` is deliberately
 excluded (overfits {US, India}, zero observed gain). Similarities are computed on
 both the raw and the legal-suffix-stripped ("core") name views, and on phonetic
 skeletons. Numbers get their own block including ``num_conflict_flag``.
 
+v2 additions (2026-09):
+  * ``skel_concat_ratio``      — skeleton string ratio, spaces stripped (absorbs
+                                 transliteration + token-segmentation variance).
+  * ``long_num_exact``         — shared 4+ digit token (postcode/house-number
+                                 grade number shared exactly).
+  * ``addr_housenum_exact``    — first address number identical on both sides.
+  * ``name_idf_soft_jaccard``  — IDF-weighted (soft) Jaccard over core name
+                                 tokens; rare tokens dominate common ones. Weights
+                                 come from the candidate-corpus DF built by
+                                 ``build_training_set`` (``set_idf``), and default
+                                 to a uniform weight when unset (= plain Jaccard,
+                                 which is also what France-unseen tokens degrade to
+                                 at inference time).
+
 Parallelism (plan §5.4): workers receive only their own chunk of record tuples
 (no shared big dicts — fork+read stays CoW-friendly) and return float32 arrays.
+The IDF map is injected into pool workers once via the pool initializer.
 """
 
 import multiprocessing as mp
@@ -34,7 +49,30 @@ FEATURE_NAMES = [
     "num_jaccard", "num_shared", "num_conflict", "num_longest_shared_len",
     "postcode_delta",
     "addr_empty_s1", "addr_empty_cand", "name_nonlatin_cand", "is_s3",
+    "skel_concat_ratio", "long_num_exact", "addr_housenum_exact",
+    "name_idf_soft_jaccard",
 ]
+
+# Module-level IDF state, replicated into pool workers via the initializer.
+_IDF = {}
+_IDF_DEFAULT = 1.0
+
+
+def set_idf(weights: dict, default: float = 1.0):
+    """Set the token->IDF map used by ``name_idf_soft_jaccard``.
+
+    Tokens absent from the map get ``default`` (the max IDF at build time, so
+    hapax/unknown tokens keep their high weight; a fully-unseen vocabulary
+    degrades to uniform weights = plain Jaccard).
+    """
+    global _IDF, _IDF_DEFAULT
+    _IDF = weights or {}
+    _IDF_DEFAULT = float(default)
+
+
+def _pool_init(weights, default):
+    global _IDF, _IDF_DEFAULT
+    _IDF, _IDF_DEFAULT = weights, float(default)
 
 
 def _jaccard(a: set, b: set) -> float:
@@ -43,6 +81,22 @@ def _jaccard(a: set, b: set) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+def _soft_jaccard(a: set, b: set) -> float:
+    """IDF-weighted Jaccard: sum(min(w)) / sum(max(w)) over the token union."""
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    if not _IDF and _IDF_DEFAULT == 1.0:
+        return _jaccard(a, b)
+    wa = {t: _IDF.get(t, _IDF_DEFAULT) for t in a}
+    wb = {t: _IDF.get(t, _IDF_DEFAULT) for t in b}
+    inter = wa.keys() & wb.keys()
+    num = sum(min(wa[t], wb[t]) for t in inter)
+    den = sum(wa.values()) + sum(wb.values()) - num
+    return num / den if den > 0 else 0.0
 
 
 def _postcode_delta(a, b) -> float:
@@ -64,8 +118,8 @@ def pair_vec(job):
     sk2 = tc.skeleton_text(name2)
     aw1 = set(tc.address_words(addr1))
     aw2 = set(tc.address_words(addr2))
-    num1 = set(tc.numbers(addr1))
-    num2 = set(tc.numbers(addr2))
+    nums1, nums2 = tc.numbers(addr1), tc.numbers(addr2)
+    num1, num2 = set(nums1), set(nums2)
 
     a = np.empty(len(FEATURE_NAMES), dtype=np.float32)
     a[0] = score
@@ -106,6 +160,11 @@ def pair_vec(job):
     a[35] = 1.0 if not addr2.strip() else 0.0
     a[36] = 1.0 if any(ord(c) > 127 for c in name2) else 0.0
     a[37] = 1.0 if cand_id.startswith("S3-") else 0.0
+    a[38] = fuzz.ratio(sk1.replace(" ", ""), sk2.replace(" ", "")) / 100.0
+    shared = num1 & num2
+    a[39] = 1.0 if any(len(x) >= 4 for x in shared) else 0.0
+    a[40] = 1.0 if (nums1 and nums2 and nums1[0] == nums2[0]) else 0.0
+    a[41] = _soft_jaccard(set(core1.split()), set(core2.split()))
     return a
 
 
@@ -120,12 +179,21 @@ def _waves(jobs, per_wave):
         yield jobs[i:i + per_wave]
 
 
-def build_matrix(jobs, n_jobs=1, per_wave=50_000):
-    """jobs: list of tuples. Returns float32 [n, len(FEATURE_NAMES)]."""
+def build_matrix(jobs, n_jobs=1, per_wave=10_000, ctx="spawn"):
+    """jobs: list of tuples. Returns float32 [n, len(FEATURE_NAMES)].
+
+    Call ``set_idf`` first when the IDF-weighted feature should be active; the
+    current module-level IDF state is replicated into pool workers at spawn.
+
+    ``ctx="spawn"`` (default): fresh workers, no inherited parent memory — safe
+    when the caller holds gigabytes. Set ``ctx="fork"`` only for small in-RAM jobs.
+    """
     if not jobs:
         return np.zeros((0, len(FEATURE_NAMES)), np.float32)
     if n_jobs > 1 and len(jobs) > per_wave:
-        with mp.get_context("fork").Pool(n_jobs) as pool:
+        with mp.get_context(ctx).Pool(n_jobs, initializer=_pool_init,
+                                      initargs=(_IDF, _IDF_DEFAULT),
+                                      maxtasksperchild=4) as pool:
             mats = [m for m in pool.imap(_worker, _waves(jobs, per_wave), chunksize=1)
                     if m is not None]
     else:
